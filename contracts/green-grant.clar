@@ -44,9 +44,20 @@
   }
 )
 
+(define-map project-donations
+  { project-id: uint, donor: principal }
+  { amount: uint, donated-at: uint }
+)
+
+(define-map donor-totals
+  { donor: principal }
+  { total-donated: uint, projects-supported: uint }
+)
+
 ;; Global variables
 (define-data-var next-project-id uint u1)
 (define-data-var contract-owner principal CONTRACT_OWNER)
+(define-data-var total-platform-funds uint u0)
 
 ;; Private functions
 (define-private (is-contract-owner)
@@ -106,5 +117,150 @@
   (match (map-get? projects { project-id: project-id })
     project (is-eq (get owner project) user)
     false
+  )
+)
+
+;; Donate to a specific project
+(define-public (donate-to-project (project-id uint) (amount uint))
+  (let ((project (unwrap! (map-get? projects { project-id: project-id }) ERR_PROJECT_NOT_FOUND)))
+    ;; Validate donation amount
+    (asserts! (> amount u0) ERR_INSUFFICIENT_FUNDS)
+    ;; Check project is active or pending (can receive donations)
+    (asserts! (or (is-eq (get status project) PROJECT_STATUS_PENDING)
+                  (is-eq (get status project) PROJECT_STATUS_ACTIVE)) ERR_INVALID_STATUS)
+    
+    ;; Transfer STX from donor to contract
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    
+    ;; Update project raised amount
+    (map-set projects 
+      { project-id: project-id }
+      (merge project { raised-amount: (+ (get raised-amount project) amount) })
+    )
+    
+    ;; Record individual donation
+    (map-set project-donations
+      { project-id: project-id, donor: tx-sender }
+      { amount: amount, donated-at: block-height }
+    )
+    
+    ;; Update donor totals
+    (match (map-get? donor-totals { donor: tx-sender })
+      existing-donor (map-set donor-totals 
+        { donor: tx-sender }
+        { 
+          total-donated: (+ (get total-donated existing-donor) amount),
+          projects-supported: (+ (get projects-supported existing-donor) u1)
+        }
+      )
+      (map-set donor-totals 
+        { donor: tx-sender }
+        { total-donated: amount, projects-supported: u1 }
+      )
+    )
+    
+    ;; Update total platform funds
+    (var-set total-platform-funds (+ (var-get total-platform-funds) amount))
+    
+    (ok amount)
+  )
+)
+
+;; Add milestone to a project (only project owner)
+(define-public (add-milestone 
+  (project-id uint) 
+  (milestone-id uint) 
+  (title (string-ascii 256)) 
+  (description (string-ascii 512)) 
+  (amount uint)
+)
+  (let ((project (unwrap! (map-get? projects { project-id: project-id }) ERR_PROJECT_NOT_FOUND)))
+    ;; Only project owner can add milestones
+    (asserts! (is-eq (get owner project) tx-sender) ERR_OWNER_ONLY)
+    ;; Validate inputs
+    (asserts! (> (len title) u0) ERR_INVALID_STATUS)
+    (asserts! (> (len description) u0) ERR_INVALID_STATUS)
+    (asserts! (> amount u0) ERR_INVALID_STATUS)
+    
+    ;; Check milestone doesn't already exist
+    (asserts! (is-none (map-get? project-milestones { project-id: project-id, milestone-id: milestone-id })) 
+              ERR_PROJECT_ALREADY_EXISTS)
+    
+    ;; Add milestone
+    (map-set project-milestones
+      { project-id: project-id, milestone-id: milestone-id }
+      {
+        title: title,
+        description: description,
+        amount: amount,
+        verified: false,
+        verifier: none,
+        verified-at: none
+      }
+    )
+    
+    (ok milestone-id)
+  )
+)
+
+;; Verify milestone completion (contract owner only)
+(define-public (verify-milestone (project-id uint) (milestone-id uint))
+  (let ((milestone (unwrap! (map-get? project-milestones { project-id: project-id, milestone-id: milestone-id }) 
+                            ERR_MILESTONE_NOT_FOUND)))
+    ;; Only contract owner can verify milestones
+    (asserts! (is-contract-owner) ERR_OWNER_ONLY)
+    ;; Check milestone isn't already verified
+    (asserts! (not (get verified milestone)) ERR_INVALID_STATUS)
+    
+    ;; Mark milestone as verified
+    (map-set project-milestones
+      { project-id: project-id, milestone-id: milestone-id }
+      (merge milestone {
+        verified: true,
+        verifier: (some tx-sender),
+        verified-at: (some block-height)
+      })
+    )
+    
+    (ok true)
+  )
+)
+
+;; Get milestone details
+(define-read-only (get-milestone (project-id uint) (milestone-id uint))
+  (map-get? project-milestones { project-id: project-id, milestone-id: milestone-id })
+)
+
+;; Get donation details
+(define-read-only (get-donation (project-id uint) (donor principal))
+  (map-get? project-donations { project-id: project-id, donor: donor })
+)
+
+;; Get donor statistics  
+(define-read-only (get-donor-stats (donor principal))
+  (default-to { total-donated: u0, projects-supported: u0 }
+    (map-get? donor-totals { donor: donor }))
+)
+
+;; Get total platform funds
+(define-read-only (get-platform-funds)
+  (var-get total-platform-funds)
+)
+
+;; Update project status (project owner only)
+(define-public (update-project-status (project-id uint) (new-status uint))
+  (let ((project (unwrap! (map-get? projects { project-id: project-id }) ERR_PROJECT_NOT_FOUND)))
+    ;; Only project owner can update status
+    (asserts! (is-eq (get owner project) tx-sender) ERR_OWNER_ONLY)
+    ;; Validate status values
+    (asserts! (<= new-status PROJECT_STATUS_CANCELLED) ERR_INVALID_STATUS)
+    
+    ;; Update project status
+    (map-set projects 
+      { project-id: project-id }
+      (merge project { status: new-status })
+    )
+    
+    (ok new-status)
   )
 )
