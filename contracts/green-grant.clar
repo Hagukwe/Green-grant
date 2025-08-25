@@ -10,6 +10,10 @@
 (define-constant ERR_INVALID_STATUS (err u103))
 (define-constant ERR_INSUFFICIENT_FUNDS (err u104))
 (define-constant ERR_MILESTONE_NOT_FOUND (err u105))
+(define-constant ERR_FUNDS_NOT_AVAILABLE (err u106))
+(define-constant ERR_MILESTONE_NOT_VERIFIED (err u107))
+(define-constant ERR_ALREADY_RELEASED (err u108))
+(define-constant ERR_PROJECT_NOT_ACTIVE (err u109))
 
 ;; Project statuses
 (define-constant PROJECT_STATUS_PENDING u0)
@@ -40,7 +44,19 @@
     amount: uint,
     verified: bool,
     verifier: (optional principal),
-    verified-at: (optional uint)
+    verified-at: (optional uint),
+    funds-released: bool,
+    released-at: (optional uint)
+  }
+)
+
+(define-map milestone-releases
+  { project-id: uint, milestone-id: uint }
+  {
+    amount-released: uint,
+    recipient: principal,
+    released-by: principal,
+    release-block: uint
   }
 )
 
@@ -195,7 +211,9 @@
         amount: amount,
         verified: false,
         verifier: none,
-        verified-at: none
+        verified-at: none,
+        funds-released: false,
+        released-at: none
       }
     )
     
@@ -263,4 +281,75 @@
     
     (ok new-status)
   )
+)
+
+;; Release funds for a verified milestone (contract owner only)
+(define-public (release-milestone-funds (project-id uint) (milestone-id uint))
+  (let (
+    (project (unwrap! (map-get? projects { project-id: project-id }) ERR_PROJECT_NOT_FOUND))
+    (milestone (unwrap! (map-get? project-milestones { project-id: project-id, milestone-id: milestone-id }) 
+                        ERR_MILESTONE_NOT_FOUND))
+  )
+    ;; Only contract owner can release funds
+    (asserts! (is-contract-owner) ERR_OWNER_ONLY)
+    ;; Check milestone is verified
+    (asserts! (get verified milestone) ERR_MILESTONE_NOT_VERIFIED)
+    ;; Check funds haven't been released already
+    (asserts! (not (get funds-released milestone)) ERR_ALREADY_RELEASED)
+    ;; Check project is active
+    (asserts! (is-eq (get status project) PROJECT_STATUS_ACTIVE) ERR_PROJECT_NOT_ACTIVE)
+    ;; Check sufficient funds available
+    (asserts! (>= (get raised-amount project) (get amount milestone)) ERR_FUNDS_NOT_AVAILABLE)
+    
+    ;; Transfer funds from contract to project owner
+    (try! (as-contract (stx-transfer? (get amount milestone) tx-sender (get owner project))))
+    
+    ;; Mark milestone funds as released
+    (map-set project-milestones
+      { project-id: project-id, milestone-id: milestone-id }
+      (merge milestone {
+        funds-released: true,
+        released-at: (some block-height)
+      })
+    )
+    
+    ;; Record release details
+    (map-set milestone-releases
+      { project-id: project-id, milestone-id: milestone-id }
+      {
+        amount-released: (get amount milestone),
+        recipient: (get owner project),
+        released-by: tx-sender,
+        release-block: block-height
+      }
+    )
+    
+    ;; Update platform funds
+    (var-set total-platform-funds (- (var-get total-platform-funds) (get amount milestone)))
+    
+    (ok (get amount milestone))
+  )
+)
+
+;; Emergency withdrawal (contract owner only)
+(define-public (emergency-withdraw (amount uint))
+  (begin
+    ;; Only contract owner can withdraw
+    (asserts! (is-contract-owner) ERR_OWNER_ONLY)
+    ;; Check sufficient funds
+    (asserts! (>= (var-get total-platform-funds) amount) ERR_INSUFFICIENT_FUNDS)
+    
+    ;; Transfer funds to contract owner
+    (try! (as-contract (stx-transfer? amount tx-sender (var-get contract-owner))))
+    
+    ;; Update platform funds
+    (var-set total-platform-funds (- (var-get total-platform-funds) amount))
+    
+    (ok amount)
+  )
+)
+
+;; Get milestone release details
+(define-read-only (get-milestone-release (project-id uint) (milestone-id uint))
+  (map-get? milestone-releases { project-id: project-id, milestone-id: milestone-id })
 )
