@@ -353,3 +353,91 @@
 (define-read-only (get-milestone-release (project-id uint) (milestone-id uint))
   (map-get? milestone-releases { project-id: project-id, milestone-id: milestone-id })
 )
+
+;; Get project funding progress as percentage
+(define-read-only (get-funding-progress (project-id uint))
+  (match (map-get? projects { project-id: project-id })
+    project
+      (if (> (get target-amount project) u0)
+        (/ (* (get raised-amount project) u100) (get target-amount project))
+        u0)
+    u0
+  )
+)
+
+;; Check if project funding is complete
+(define-read-only (is-fully-funded (project-id uint))
+  (match (map-get? projects { project-id: project-id })
+    project (>= (get raised-amount project) (get target-amount project))
+    false
+  )
+)
+
+;; Get contract statistics
+(define-read-only (get-contract-stats)
+  {
+    total-projects: (- (var-get next-project-id) u1),
+    total-funds: (var-get total-platform-funds),
+    contract-owner: (var-get contract-owner)
+  }
+)
+
+;; Transfer contract ownership (current owner only)
+(define-public (transfer-ownership (new-owner principal))
+  (begin
+    ;; Only current owner can transfer ownership
+    (asserts! (is-contract-owner) ERR_OWNER_ONLY)
+    ;; Update contract owner
+    (var-set contract-owner new-owner)
+    (ok new-owner)
+  )
+)
+
+;; Cancel project (project owner only)
+(define-public (cancel-project (project-id uint))
+  (let ((project (unwrap! (map-get? projects { project-id: project-id }) ERR_PROJECT_NOT_FOUND)))
+    ;; Only project owner can cancel
+    (asserts! (is-eq (get owner project) tx-sender) ERR_OWNER_ONLY)
+    ;; Can only cancel pending or active projects
+    (asserts! (or (is-eq (get status project) PROJECT_STATUS_PENDING)
+                  (is-eq (get status project) PROJECT_STATUS_ACTIVE)) ERR_INVALID_STATUS)
+    
+    ;; Update project status to cancelled
+    (map-set projects 
+      { project-id: project-id }
+      (merge project { status: PROJECT_STATUS_CANCELLED })
+    )
+    
+    (ok PROJECT_STATUS_CANCELLED)
+  )
+)
+
+;; Batch verify multiple milestones (contract owner only)
+(define-public (batch-verify-milestones (verifications (list 10 {project-id: uint, milestone-id: uint})))
+  (begin
+    ;; Only contract owner can verify
+    (asserts! (is-contract-owner) ERR_OWNER_ONLY)
+    
+    ;; Process each verification
+    (ok (map verify-single-milestone verifications))
+  )
+)
+
+;; Helper function for batch verification
+(define-private (verify-single-milestone (verification {project-id: uint, milestone-id: uint}))
+  (match (map-get? project-milestones { project-id: (get project-id verification), milestone-id: (get milestone-id verification) })
+    milestone
+      (if (not (get verified milestone))
+        (map-set project-milestones
+          { project-id: (get project-id verification), milestone-id: (get milestone-id verification) }
+          (merge milestone {
+            verified: true,
+            verifier: (some tx-sender),
+            verified-at: (some block-height)
+          })
+        )
+        false
+      )
+    false
+  )
+)
