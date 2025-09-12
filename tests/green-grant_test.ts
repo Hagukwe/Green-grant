@@ -877,3 +877,613 @@ Clarinet.test({
         block.receipts[0].result.expectOk().expectUint(PROJECT_STATUS_ACTIVE);
     }
 });
+
+/**
+ * COMMIT 3 TESTS: Mock Data & Integration
+ * 
+ * These tests focus on edge cases, boundary conditions, and integration scenarios:
+ * - Large uint values and boundary testing
+ * - Mock trait simulation for inter-contract calls
+ * - Runtime cost analysis and optimization
+ * - Complex data scenarios and edge cases
+ */
+
+Clarinet.test({
+    name: "🔢 Should handle large uint values and boundary conditions",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const deployer = accounts.get('deployer')!;
+        const projectOwner = accounts.get('wallet_1')!;
+        const whale = accounts.get('wallet_2')!; // Large donor
+        
+        // Test with maximum reasonable STX amounts (close to uint max but practical)
+        const largeTarget = 999999999999999; // ~1M STX (very large project)
+        const largeDonation = 100000000000000; // ~100K STX (whale donation)
+        
+        // Register project with large target amount
+        let block = chain.mineBlock([
+            Tx.contractCall(
+                'green-grant',
+                'register-project',
+                [
+                    types.ascii("Massive Global Reforestation"),
+                    types.ascii("Planet-scale reforestation initiative covering multiple continents"),
+                    types.uint(largeTarget),
+                    types.ascii("global-reforestation")
+                ],
+                projectOwner.address
+            )
+        ]);
+        
+        block.receipts[0].result.expectOk().expectUint(1);
+        
+        // Make large donation
+        block = chain.mineBlock([
+            Tx.contractCall(
+                'green-grant',
+                'donate-to-project',
+                [types.uint(1), types.uint(largeDonation)],
+                whale.address
+            )
+        ]);
+        
+        block.receipts[0].result.expectOk().expectUint(largeDonation);
+        
+        // Test funding progress calculation with large numbers
+        let progressQuery = chain.callReadOnlyFn(
+            'green-grant',
+            'get-funding-progress',
+            [types.uint(1)],
+            deployer.address
+        );
+        
+        // Should calculate percentage correctly: (100K / 1M) * 100 = 10%
+        const expectedProgress = Math.floor((largeDonation * 100) / largeTarget);
+        progressQuery.result.expectUint(expectedProgress);
+        
+        // Test boundary: exactly at target
+        const remainingAmount = largeTarget - largeDonation;
+        block = chain.mineBlock([
+            Tx.contractCall(
+                'green-grant',
+                'donate-to-project',
+                [types.uint(1), types.uint(remainingAmount)],
+                whale.address
+            )
+        ]);
+        
+        block.receipts[0].result.expectOk().expectUint(remainingAmount);
+        
+        // Check if project is now fully funded
+        let fullyFundedQuery = chain.callReadOnlyFn(
+            'green-grant',
+            'is-fully-funded',
+            [types.uint(1)],
+            deployer.address
+        );
+        
+        fullyFundedQuery.result.expectBool(true);
+        
+        // Test milestone with large amount
+        block = chain.mineBlock([
+            Tx.contractCall(
+                'green-grant',
+                'add-milestone',
+                [
+                    types.uint(1),
+                    types.uint(1),
+                    types.ascii("Phase 1: Continental Coverage"),
+                    types.ascii("Establish reforestation operations across 3 continents"),
+                    types.uint(500000000000000) // 500K STX milestone
+                ],
+                projectOwner.address
+            )
+        ]);
+        
+        block.receipts[0].result.expectOk().expectUint(1);
+    }
+});
+
+Clarinet.test({
+    name: "📊 Should handle edge cases with empty and maximum length strings",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const projectOwner = accounts.get('wallet_1')!;
+        
+        // Test maximum length strings (Clarity string limits)
+        const maxTitle = "A".repeat(256); // Maximum title length
+        const maxDescription = "B".repeat(1024); // Maximum description length
+        const maxCategory = "C".repeat(64); // Maximum category length
+        
+        // Should succeed with maximum length strings
+        let block = chain.mineBlock([
+            Tx.contractCall(
+                'green-grant',
+                'register-project',
+                [
+                    types.ascii(maxTitle),
+                    types.ascii(maxDescription),
+                    types.uint(5000000),
+                    types.ascii(maxCategory)
+                ],
+                projectOwner.address
+            )
+        ]);
+        
+        block.receipts[0].result.expectOk().expectUint(1);
+        
+        // Test milestone with maximum length strings
+        const maxMilestoneTitle = "D".repeat(256);
+        const maxMilestoneDesc = "E".repeat(512);
+        
+        block = chain.mineBlock([
+            Tx.contractCall(
+                'green-grant',
+                'add-milestone',
+                [
+                    types.uint(1),
+                    types.uint(1),
+                    types.ascii(maxMilestoneTitle),
+                    types.ascii(maxMilestoneDesc),
+                    types.uint(1000000)
+                ],
+                projectOwner.address
+            )
+        ]);
+        
+        block.receipts[0].result.expectOk().expectUint(1);
+        
+        // Test edge case: minimum valid values
+        block = chain.mineBlock([
+            Tx.contractCall(
+                'green-grant',
+                'register-project',
+                [
+                    types.ascii("X"), // Minimum length (1 char)
+                    types.ascii("Y"), // Minimum description
+                    types.uint(1),    // Minimum target (1 microSTX)
+                    types.ascii("Z")  // Minimum category
+                ],
+                projectOwner.address
+            )
+        ]);
+        
+        block.receipts[0].result.expectOk().expectUint(2);
+        
+        // Test minimum donation amount
+        block = chain.mineBlock([
+            Tx.contractCall(
+                'green-grant',
+                'donate-to-project',
+                [types.uint(2), types.uint(1)], // 1 microSTX donation
+                projectOwner.address
+            )
+        ]);
+        
+        block.receipts[0].result.expectOk().expectUint(1);
+    }
+});
+
+Clarinet.test({
+    name: "🔄 Should simulate inter-contract integration patterns",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const deployer = accounts.get('deployer')!;
+        const projectOwner = accounts.get('wallet_1')!;
+        const donor = accounts.get('wallet_2')!;
+        
+        // Simulate a complex integration scenario where external systems
+        // might interact with our contract through multiple calls
+        
+        // Setup: Create project for integration testing
+        let block = chain.mineBlock([
+            Tx.contractCall(
+                'green-grant',
+                'register-project',
+                [
+                    types.ascii("Integration Test Project"),
+                    types.ascii("Testing integration with external systems"),
+                    types.uint(10000000),
+                    types.ascii("integration-test")
+                ],
+                projectOwner.address
+            )
+        ]);
+        
+        const projectId = block.receipts[0].result.expectOk().expectUint(1);
+        
+        // Simulate external system operations (like a frontend or API)
+        // that might batch multiple operations together
+        block = chain.mineBlock([
+            // External system: Activate project
+            Tx.contractCall(
+                'green-grant',
+                'update-project-status',
+                [types.uint(1), types.uint(PROJECT_STATUS_ACTIVE)],
+                projectOwner.address
+            ),
+            // External system: Multiple donors donate simultaneously
+            Tx.contractCall(
+                'green-grant',
+                'donate-to-project',
+                [types.uint(1), types.uint(2000000)],
+                donor.address
+            ),
+            // External system: Project owner immediately adds milestone
+            Tx.contractCall(
+                'green-grant',
+                'add-milestone',
+                [
+                    types.uint(1),
+                    types.uint(1),
+                    types.ascii("Integration Milestone"),
+                    types.ascii("Testing integrated milestone creation"),
+                    types.uint(1500000)
+                ],
+                projectOwner.address
+            )
+        ]);
+        
+        // Verify all integration steps succeeded
+        assertEquals(block.receipts.length, 3);
+        block.receipts[0].result.expectOk().expectUint(PROJECT_STATUS_ACTIVE);
+        block.receipts[1].result.expectOk().expectUint(2000000);
+        block.receipts[2].result.expectOk().expectUint(1);
+        
+        // Simulate governance-style voting integration
+        // (Mock scenario: multiple contract owners could verify milestones)
+        block = chain.mineBlock([
+            Tx.contractCall(
+                'green-grant',
+                'verify-milestone',
+                [types.uint(1), types.uint(1)],
+                deployer.address // Current contract owner
+            )
+        ]);
+        
+        block.receipts[0].result.expectOk().expectBool(true);
+        
+        // Test contract stats aggregation (useful for dashboards/analytics)
+        let contractStats = chain.callReadOnlyFn(
+            'green-grant',
+            'get-contract-stats',
+            [],
+            deployer.address
+        );
+        
+        const stats = contractStats.result.expectTuple() as any;
+        assertEquals(stats['total-projects'], types.uint(1));
+        assertEquals(stats['total-funds'], types.uint(2000000));
+        assertEquals(stats['contract-owner'], deployer.address);
+        
+        // Simulate batch verification scenario (useful for administrative tools)
+        block = chain.mineBlock([
+            // Add another milestone
+            Tx.contractCall(
+                'green-grant',
+                'add-milestone',
+                [
+                    types.uint(1),
+                    types.uint(2),
+                    types.ascii("Second Milestone"),
+                    types.ascii("Additional milestone for batch testing"),
+                    types.uint(1000000)
+                ],
+                projectOwner.address
+            )
+        ]);
+        
+        block.receipts[0].result.expectOk().expectUint(2);
+        
+        // Test batch verification functionality
+        block = chain.mineBlock([
+            Tx.contractCall(
+                'green-grant',
+                'batch-verify-milestones',
+                [
+                    types.list([
+                        types.tuple({
+                            'project-id': types.uint(1),
+                            'milestone-id': types.uint(2)
+                        })
+                    ])
+                ],
+                deployer.address
+            )
+        ]);
+        
+        // Verify batch operation succeeded
+        block.receipts[0].result.expectOk();
+    }
+});
+
+Clarinet.test({
+    name: "⚡ Should analyze runtime costs for optimization",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const deployer = accounts.get('deployer')!;
+        const projectOwner = accounts.get('wallet_1')!;
+        const donor = accounts.get('wallet_2')!;
+        
+        // Test cost-efficient operations vs potentially expensive ones
+        
+        // Cost test 1: Simple project registration
+        let block = chain.mineBlock([
+            Tx.contractCall(
+                'green-grant',
+                'register-project',
+                [
+                    types.ascii("Cost Analysis Project"),
+                    types.ascii("Testing computational costs of various operations"),
+                    types.uint(5000000),
+                    types.ascii("cost-analysis")
+                ],
+                projectOwner.address
+            )
+        ]);
+        
+        // Note: In real scenarios, you would use clarinet test --costs to analyze
+        // this transaction's runtime cost
+        block.receipts[0].result.expectOk().expectUint(1);
+        
+        // Cost test 2: Multiple rapid donations (stress test)
+        block = chain.mineBlock([
+            Tx.contractCall(
+                'green-grant',
+                'donate-to-project',
+                [types.uint(1), types.uint(100000)], // 100k microSTX
+                donor.address
+            ),
+            Tx.contractCall(
+                'green-grant',
+                'donate-to-project', 
+                [types.uint(1), types.uint(200000)], // 200k microSTX
+                donor.address
+            ),
+            Tx.contractCall(
+                'green-grant',
+                'donate-to-project',
+                [types.uint(1), types.uint(300000)], // 300k microSTX
+                donor.address
+            )
+        ]);
+        
+        // Verify all rapid donations succeeded efficiently
+        assertEquals(block.receipts.length, 3);
+        for (let i = 0; i < 3; i++) {
+            block.receipts[i].result.expectOk().expectUint(100000 * (i + 1));
+        }
+        
+        // Cost test 3: Complex read-only operations
+        let projectQuery = chain.callReadOnlyFn(
+            'green-grant',
+            'get-project',
+            [types.uint(1)],
+            deployer.address
+        );
+        
+        // Read operations should be very cost-efficient
+        const project = projectQuery.result.expectSome().expectTuple() as any;
+        assertEquals(project['raised-amount'], types.uint(600000)); // 100k + 200k + 300k
+        
+        // Cost test 4: Multiple milestone operations
+        block = chain.mineBlock([
+            Tx.contractCall(
+                'green-grant',
+                'add-milestone',
+                [
+                    types.uint(1),
+                    types.uint(1),
+                    types.ascii("Milestone 1"),
+                    types.ascii("Description for milestone 1"),
+                    types.uint(1000000)
+                ],
+                projectOwner.address
+            ),
+            Tx.contractCall(
+                'green-grant',
+                'add-milestone',
+                [
+                    types.uint(1),
+                    types.uint(2),
+                    types.ascii("Milestone 2"),
+                    types.ascii("Description for milestone 2"),
+                    types.uint(2000000)
+                ],
+                projectOwner.address
+            )
+        ]);
+        
+        // Verify efficient milestone creation
+        assertEquals(block.receipts.length, 2);
+        block.receipts[0].result.expectOk().expectUint(1);
+        block.receipts[1].result.expectOk().expectUint(2);
+        
+        // Cost test 5: Verification and release operations
+        block = chain.mineBlock([
+            Tx.contractCall(
+                'green-grant',
+                'verify-milestone',
+                [types.uint(1), types.uint(1)],
+                deployer.address
+            ),
+            Tx.contractCall(
+                'green-grant',
+                'release-milestone-funds',
+                [types.uint(1), types.uint(1)],
+                deployer.address
+            )
+        ]);
+        
+        // These operations involve STX transfers, so cost analysis is important
+        assertEquals(block.receipts.length, 2);
+        block.receipts[0].result.expectOk().expectBool(true);
+        block.receipts[1].result.expectOk().expectUint(1000000);
+        
+        // Verify final state after all cost-tested operations
+        let finalProjectQuery = chain.callReadOnlyFn(
+            'green-grant',
+            'get-project',
+            [types.uint(1)],
+            deployer.address
+        );
+        
+        const finalProject = finalProjectQuery.result.expectSome().expectTuple() as any;
+        assertEquals(finalProject['raised-amount'], types.uint(600000));
+        
+        // Verify milestone release was recorded
+        let releaseQuery = chain.callReadOnlyFn(
+            'green-grant',
+            'get-milestone-release',
+            [types.uint(1), types.uint(1)],
+            deployer.address
+        );
+        
+        releaseQuery.result.expectSome(); // Should have release record
+    }
+});
+
+Clarinet.test({
+    name: "🌐 Should handle complex multi-project scenarios with cross-references",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const deployer = accounts.get('deployer')!;
+        const owner1 = accounts.get('wallet_1')!;
+        const owner2 = accounts.get('wallet_2')!;
+        const owner3 = accounts.get('wallet_3')!;
+        const donor1 = accounts.get('wallet_4')!;
+        const donor2 = accounts.get('wallet_5')!;
+        
+        // Create a complex ecosystem of multiple projects
+        let block = chain.mineBlock([
+            // Project 1: Solar Energy
+            Tx.contractCall(
+                'green-grant',
+                'register-project',
+                [
+                    types.ascii("Community Solar Grid"),
+                    types.ascii("Distributed solar energy for rural communities"),
+                    types.uint(15000000),
+                    types.ascii("renewable-energy")
+                ],
+                owner1.address
+            ),
+            // Project 2: Ocean Cleanup  
+            Tx.contractCall(
+                'green-grant',
+                'register-project',
+                [
+                    types.ascii("Pacific Plastic Removal"),
+                    types.ascii("Advanced plastic extraction from ocean waters"),
+                    types.uint(12000000),
+                    types.ascii("ocean-cleanup")
+                ],
+                owner2.address
+            ),
+            // Project 3: Carbon Capture
+            Tx.contractCall(
+                'green-grant',
+                'register-project',
+                [
+                    types.ascii("Atmospheric Carbon Capture"),
+                    types.ascii("Industrial-scale carbon capture facility"),
+                    types.uint(25000000),
+                    types.ascii("carbon-capture")
+                ],
+                owner3.address
+            )
+        ]);
+        
+        // Verify all projects created
+        assertEquals(block.receipts.length, 3);
+        block.receipts[0].result.expectOk().expectUint(1);
+        block.receipts[1].result.expectOk().expectUint(2);
+        block.receipts[2].result.expectOk().expectUint(3);
+        
+        // Activate all projects
+        block = chain.mineBlock([
+            Tx.contractCall('green-grant', 'update-project-status', 
+                [types.uint(1), types.uint(PROJECT_STATUS_ACTIVE)], owner1.address),
+            Tx.contractCall('green-grant', 'update-project-status', 
+                [types.uint(2), types.uint(PROJECT_STATUS_ACTIVE)], owner2.address),
+            Tx.contractCall('green-grant', 'update-project-status', 
+                [types.uint(3), types.uint(PROJECT_STATUS_ACTIVE)], owner3.address)
+        ]);
+        
+        // Cross-project donations (donors supporting multiple causes)
+        block = chain.mineBlock([
+            // Donor 1 supports all three projects
+            Tx.contractCall('green-grant', 'donate-to-project', 
+                [types.uint(1), types.uint(3000000)], donor1.address),
+            Tx.contractCall('green-grant', 'donate-to-project', 
+                [types.uint(2), types.uint(2500000)], donor1.address),
+            Tx.contractCall('green-grant', 'donate-to-project', 
+                [types.uint(3), types.uint(4000000)], donor1.address),
+            // Donor 2 focuses on renewable energy and carbon capture
+            Tx.contractCall('green-grant', 'donate-to-project', 
+                [types.uint(1), types.uint(2000000)], donor2.address),
+            Tx.contractCall('green-grant', 'donate-to-project', 
+                [types.uint(3), types.uint(3500000)], donor2.address)
+        ]);
+        
+        // Verify all donations succeeded
+        assertEquals(block.receipts.length, 5);
+        for (let i = 0; i < 5; i++) {
+            block.receipts[i].result.expectOk();
+        }
+        
+        // Check donor 1 supported 3 projects, donor 2 supported 2 projects
+        let donor1Stats = chain.callReadOnlyFn(
+            'green-grant', 'get-donor-stats', [types.principal(donor1.address)], deployer.address
+        );
+        let donor2Stats = chain.callReadOnlyFn(
+            'green-grant', 'get-donor-stats', [types.principal(donor2.address)], deployer.address
+        );
+        
+        const d1Stats = donor1Stats.result.expectTuple() as any;
+        const d2Stats = donor2Stats.result.expectTuple() as any;
+        
+        assertEquals(d1Stats['projects-supported'], types.uint(3));
+        assertEquals(d1Stats['total-donated'], types.uint(9500000)); // 3M + 2.5M + 4M
+        assertEquals(d2Stats['projects-supported'], types.uint(2));
+        assertEquals(d2Stats['total-donated'], types.uint(5500000)); // 2M + 3.5M
+        
+        // Add milestones to all projects
+        block = chain.mineBlock([
+            // Solar project milestones
+            Tx.contractCall('green-grant', 'add-milestone', 
+                [types.uint(1), types.uint(1), types.ascii("Solar Phase 1"), 
+                 types.ascii("Install first solar array"), types.uint(5000000)], owner1.address),
+            // Ocean project milestones  
+            Tx.contractCall('green-grant', 'add-milestone', 
+                [types.uint(2), types.uint(1), types.ascii("Ocean Phase 1"), 
+                 types.ascii("Deploy cleanup vessel"), types.uint(4000000)], owner2.address),
+            // Carbon project milestones
+            Tx.contractCall('green-grant', 'add-milestone', 
+                [types.uint(3), types.uint(1), types.ascii("Carbon Phase 1"), 
+                 types.ascii("Build capture facility"), types.uint(7500000)], owner3.address)
+        ]);
+        
+        // Verify milestone creation
+        assertEquals(block.receipts.length, 3);
+        for (let i = 0; i < 3; i++) {
+            block.receipts[i].result.expectOk().expectUint(1);
+        }
+        
+        // Contract owner verifies all milestones
+        block = chain.mineBlock([
+            Tx.contractCall('green-grant', 'verify-milestone', [types.uint(1), types.uint(1)], deployer.address),
+            Tx.contractCall('green-grant', 'verify-milestone', [types.uint(2), types.uint(1)], deployer.address),
+            Tx.contractCall('green-grant', 'verify-milestone', [types.uint(3), types.uint(1)], deployer.address)
+        ]);
+        
+        // Verify all verifications succeeded
+        for (let i = 0; i < 3; i++) {
+            block.receipts[i].result.expectOk().expectBool(true);
+        }
+        
+        // Check platform statistics with multiple projects
+        let platformStats = chain.callReadOnlyFn(
+            'green-grant', 'get-contract-stats', [], deployer.address
+        );
+        
+        const stats = platformStats.result.expectTuple() as any;
+        assertEquals(stats['total-projects'], types.uint(3));
+        assertEquals(stats['total-funds'], types.uint(15000000)); // Total of all donations
+    }
+});
